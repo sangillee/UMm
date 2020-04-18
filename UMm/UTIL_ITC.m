@@ -29,83 +29,104 @@
 %       'params': fitted paramters. Depending on the model, has different fields (scale, k, b, w, d1, d2).
 
 function out = UTIL_ITC(type,choice,Amt1,Delay1,Amt2,Delay2)
-[type,choice,Amt1,Delay1,Amt2,Delay2] = dataQC(type,choice,Amt1,Delay1,Amt2,Delay2); % data quality control
+% 1. Input quality control
+[type,choice,Amt1,Delay1,Amt2,Delay2] = dataQC(type,choice,Amt1,Delay1,Amt2,Delay2);
 
-% 1. setting reasonable lower and upper bound of utility function parameters (lb, ub)
-% 2. use these bounds to sample starting points
-% 3. in case of complex models, run a simpler version of that model first to provide a hot-start
-if ismember(type,{'E','H'})
-    if strcmp(type,'E')
-        indiffk = log(Amt1./Amt2)./(Delay1-Delay2);
-    else
-        indiffk = (Amt1-Amt2)./(Amt2.*Delay1 - Amt1.*Delay2);
-    end
-    lb = log(min(indiffk)*(0.99)); ub = log(max(indiffk)*(1.01));
-    b = StartingPoints([-1,lb],[1,ub],[3,5]);
-elseif ismember(type,{'Q','GE','DD'}) % generalization of exponential models
+% 2. If complex model, run a simpler version first to provide a hot starting point
+if ismember(type,{'Q','GE','DD'})
     hotmdl = UTIL_ITC('E',choice,Amt1,Delay1,Amt2,Delay2);
-    switch type
-        case 'Q'
-            lb = [-10,0]; ub = [-1,1];
-            b = StartingPoints([-1,lb],[1,ub],[3,3,3]);
-            b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),1]];
-        case 'GE'
-            lb = [-10,0]; ub = [-1,5];
-            b = StartingPoints([-1,lb],[1,ub],[3,3,3]);
-            b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),1]];
-        case 'DD'
-            lb = [-10,-10,0]; ub = [-1,-1,1];
-            b = StartingPoints([-1,lb],[1,ub],[3,3,3,3]);
-            b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),log(hotmdl.params.k),0.5]];
-    end
-else % general hyperbolic models
+elseif ismember(type,{'GH1','GH2'})
     hotmdl = UTIL_ITC('H',choice,Amt1,Delay1,Amt2,Delay2);
-    lb = [-10,0]; ub = [-1,5];
-    b = StartingPoints([-1,lb],[1,ub],[3,5,5]);
-    b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),1]];
 end
 
-% fit the function, unless the choices are all one-sided
+% 3. Calculate the points of resolution. For simple models (E,H), this will give boundary. For complex models, this will provide starting point range
+if ismember(type,{'E','Q','GE','DD'}) % exponential class
+    indiffk = log(Amt1./Amt2)./(Delay1-Delay2);
+else % hyperbolic class
+    indiffk = (Amt1-Amt2)./(Amt2.*Delay1 - Amt1.*Delay2);
+end
+mink = min(indiffk)*(0.99); maxk = max(indiffk)*(1.01);
+
+% 4. calculate bounds and provide starting points
+minlogscale = -10; maxlogscale = 10; % some reasonable bounds for the scaling parameter.
+if ismember(type,{'E','H'}) % simple model
+    lb = [minlogscale,log(mink)]; ub = [maxlogscale,log(maxk)];
+    b = StartingPoints([-1,log(mink)],[1,log(maxk)],[3,5]);
+else % complex models
+    lbk = log(mink/2); ubk = log(maxk*2); % extra-wide boundary for complex models
+    if ismember(type,{'GE','GH1','GH2'})
+        lb = [minlogscale,lbk,0]; ub = [maxlogscale,ubk,5];
+        b = StartingPoints([-1,log(mink),0.5],[1,log(maxk),2],[3,3,5]);
+        b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),1]];
+    elseif strcmp(type,'Q')
+        lb = [minlogscale,lbk,0]; ub = [maxlogscale,ubk,1];
+        b = StartingPoints([-1,log(mink),0.1],[1,log(maxk),1],[3,3,5]);
+        b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),1]];
+    else
+        lb = [minlogscale,lbk,lbk,0]; ub = [maxlogscale,ubk,ubk,1];
+        b = StartingPoints([-1,log(mink),log(mink),0.1],[1,log(maxk),log(maxk),1],[3,3,3,3]);
+        b = [b;[log(hotmdl.params.scale),log(hotmdl.params.k),log(hotmdl.params.k),0.5]];
+    end
+end
+
+% 5. fit the function unless choices are all one-sided
 if mean(choice) == 1 || mean(choice) == 0
     % if you're here your model should already be 'E' or 'H'
-    b = [nan, mean(choice)*lb + mean(1-choice)*ub]; I = 1; minnegLL = nan;
+    b = [nan, mean(choice)*log(mink) + mean(1-choice)*log(maxk)]; I = 1; minnegLL = nan;
 else
     negLLlist = nan(size(b,1),1);
     for i = 1:size(b,1)
-        [b(i,:),negLLlist(i)] = fmincon(@negLL,b(i,:),[],[],[],[],[-10,lb],[log(10),ub],[],optimset('Algorithm','sqp','Display','off'),type,choice,Amt1,Delay1,Amt2,Delay2);
+        [b(i,:),negLLlist(i)] = fmincon(@negLL,b(i,:),[],[],[],[],lb,ub,[],optimset('Algorithm','sqp','Display','off'),type,choice,Amt1,Delay1,Amt2,Delay2);
     end
     [minnegLL,I] = min(negLLlist);
+    
+    % sanity check the fit
+    [~,logp] = negLL(b(I,:),type,choice,Amt1,Delay1,Amt2,Delay2);
+    p = choice.*exp(logp) + (1-choice).*(1-exp(logp)); % predicted choice probability for option 1
+    if (all(p>.5) || all(p<.5))
+        msg = 'Model prediction is all one-sided. Parameter estimates are unreliable.';
+        if ismember(type,{'Q','GE','DD'})
+            warning([msg,newline,'Defaulting to a simpler exponential model.']); out = hotmdl;
+        elseif ismember(type,{'GH1','GH2'})
+            warning([msg,newline,'Defaulting to a simpler hyperbolic model.']); out = hotmdl;
+        else
+            warning([msg,newline,'Providing smallest/largest differentiable k.']);
+        end
+    end
 end
 
-% prepping output struct
-out.type = type; % model type
-out.nump = size(b,2);
-out.LL = -minnegLL*length(choice);
-out.LL0 = sum(choice)*log(mean(choice)) + sum(1-choice)*log(1-mean(choice));
-out.R2 = 1-(out.LL/out.LL0);
-out.params.scale = exp(b(I,1));
-switch out.nump
-    case 2
-        out.params.k = exp(b(I,2));
-    case 3
-        out.params.k = exp(b(I,2));
-        out.params.b = b(I,3);
-    case 4
-        out.params.k1 = exp(b(I,2));
-        out.params.k2 = exp(b(I,3));
-        out.params.w = b(I,4);
+% 6. prepare output
+if ~exist('out','var')
+    out.type = type; % model type
+    out.nump = size(b,2);
+    out.percentageLaterChosen = mean(choice);
+    out.LL = -minnegLL*length(choice);
+    out.LL0 = sum(choice)*log(mean(choice)) + sum(1-choice)*log(1-mean(choice));
+    out.R2 = 1-(out.LL/out.LL0);
+    out.params.scale = exp(b(I,1));
+    switch out.nump
+        case 2
+            out.params.k = exp(b(I,2));
+        case 3
+            out.params.k = exp(b(I,2));
+            out.params.b = b(I,3);
+        case 4
+            out.params.k1 = exp(b(I,2));
+            out.params.k2 = exp(b(I,3));
+            out.params.w = b(I,4);
+    end
 end
 end
 
 % function for negative Log-Likelihood
-function negLL = negLL(params,type,choice,Amt1,Delay1,Amt2,Delay2)
+function [avgnegLL,logp] = negLL(params,type,choice,Amt1,Delay1,Amt2,Delay2)
 U1 = Util(type,Amt1,Delay1,params(2:end)); U2 = Util(type,Amt2,Delay2,params(2:end));
 DV = U1-U2; % decision variable in favor of option 1
-DV(choice==0) = -DV(choice==0); % flip signs depending on choice
+DV(choice==0) = -DV(choice==0); % decision variable in favor of the chosen option
 reg = -exp(params(1)).*DV; % decision variable multiplied with scaling factor. Hopefully this is finite
 logp = -log(1+exp(reg)); % numerically safe way to evaluate log likelihoods
-logp(reg>709) = -reg(reg>709); % this especially helps when DV is greater than 700, which, when exponentiated, will become inf.
-negLL = -mean(logp);
+logp(reg>709) = -reg(reg>709); % this helps when DV is greater than 709, which, when exponentiated, will become inf.
+avgnegLL = -mean(logp); % calculating the mean rather than the sum since this give better convergence behavior, maybe due to normalization
 end
 
 % Utility calculation
@@ -147,8 +168,7 @@ end
 
 % Performing checks on input data to make sure they are well behaved
 function [type,choice,Amt1,Delay1,Amt2,Delay2] = dataQC(type,choice,Amt1,Delay1,Amt2,Delay2)
-% converting everything to column vectors
-choice = choice(:); Amt1 = Amt1(:); Delay1 = Delay1(:); Amt2 = Amt2(:); Delay2 = Delay2(:);
+choice = choice(:); Amt1 = Amt1(:); Delay1 = Delay1(:); Amt2 = Amt2(:); Delay2 = Delay2(:); % converting everything to column vectors
 
 % if there is a scalar input, make it into a vector, the same length as choice.
 n = length(choice);
@@ -158,7 +178,7 @@ if length(Amt2) == 1;  Amt2 = repmat(Amt2,n,1); end
 if length(Delay2) == 1; Delay2 = repmat(Delay2,n,1); end
 
 % now all input should have the same length. If not, throw error
-assert( length(choice)==length(Amt1) && length(Amt1)==length(Delay1) && length(Delay1)==length(Amt2) && length(Amt2)==length(Delay2) ,'Input vectors have different number of observations');
+try [choice,Amt1,Delay1,Amt2,Delay2]; catch; error('Inputs have different length'); end %#ok<VUNUS>
 
 % detect missing trials, remove them, and give a warning that some trials were removed
 miss = isnan(choice) | isnan(Amt1) | isnan(Delay1) | isnan(Amt2) | isnan(Delay2); % nans are missing observations
@@ -169,15 +189,27 @@ end
 
 % check for variable sanity
 assert(all(Delay1>=0) && all(Delay2>=0),'Delay should be non-negative')
+assert(all(Delay1 ~= Delay2),'Some trials have same delay for both options. Please remove these trials')
+assert(all(Amt1>=0) && all(Amt2>=0),'Only positive amounts are supported at the moment')
 assert( sum(choice ~= 0 & choice ~= 1) == 0 ,'Choice input has non binary elements');
 assert(ismember(type,{'E','H','Q','GE','DD','GH1','GH2'}),'Unknown discounting function type')
 
-% if choices are all one-sided
-if mean(choice) ==1 || mean(choice) == 0
+% swap options so that, internally, option1 is always the more patient option
+swapind = Delay2 > Delay1; % these trials have option 2 as the more patient option
+tempAmt = Amt1(swapind); tempDel = Delay1(swapind); choice(swapind) = 1-choice(swapind);
+Amt1(swapind) = Amt2(swapind); Amt2(swapind) = tempAmt;
+Delay1(swapind) = Delay2(swapind); Delay2(swapind) = tempDel;
+
+% if data is unsuitable for estimation, simplify the model and let the user know
+if mean(choice)==1 || mean(choice)==0
+    msg = ['Choices are entirely one-sided. Estimation is impossible.',newline];
     if ismember(type,{'Q','GE','DD'})
-        warning('All choices are one-sided. Defaulting to a simpler exponential model and providing boundary k'); type = 'E';
+        type = 'E';
+        msg = [msg, 'Defaulting to a simpler exponential model and '];
     elseif ismember(type,{'GH1','GH2'})
-        warning('All choices are one-sided. Defaulting to a simpler hyperbolic model and providing boundary k'); type = 'H';
+        type = 'H';
+        msg = [msg, 'Defaulting to a simpler hyperbolic model and '];
     end
+    warning([msg, 'providing smallest/largest differentiable k.']);
 end
 end
