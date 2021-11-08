@@ -143,6 +143,7 @@ swapind = Prob2 < Prob1; % these trials have option 2 as the more risky option
 tempAmt = Amt1(swapind); tempProb = Prob1(swapind); choice(swapind) = 1-choice(swapind);
 Amt1(swapind) = Amt2(swapind); Amt2(swapind) = tempAmt;
 Prob1(swapind) = Prob2(swapind); Prob2(swapind) = tempProb;
+assert(all(Amt1>Amt2),'The more risky amount should always be larger than the less risky amount')
 
 % if data is unsuitable for estimation, simplify the model and let the user know
 if mean(choice)==1 || mean(choice)==0
